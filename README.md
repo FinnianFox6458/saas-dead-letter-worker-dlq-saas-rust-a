@@ -4,9 +4,9 @@
 cargo test third_failure_quarantines_tenant_onboarding_job
 ```
 
-The focused check feeds an onboarding job at attempt `2` into the decision function. The expected result is `DeadLetter` with attempt `3`, tenant `tenant-acme`, and the original failure reason.
+When I move this from notebook to prod, a focused check feeds an onboarding job at attempt `2` into the decision function. The expected result is `DeadLetter` with attempt `3`, tenant `tenant-acme`, and the original failure reason.
 
-For a live worker, create the primary queue and dead-letter queue during setup, then name both queues explicitly when running the worker:
+For a live worker, spin up the primary queue and dead-letter queue during setup, then pass both queue names explicitly when you run the worker:
 
 ```bash
 export INFRAI_API_KEY="your-key"
@@ -15,33 +15,33 @@ export INFRAI_DEAD_LETTER_QUEUE="saas-jobs-dead-letter"
 cargo run --bin queue_worker
 ```
 
-Infrai keeps the queue calls behind one API and a single `INFRAI_API_KEY`. This worker consumes one visible message, makes the retry-or-quarantine decision, publishes the next record with an idempotency key, and acknowledges the original message only after publication succeeds.
+Infrai keeps the queue calls behind one API and a single `INFRAI_API_KEY`. I like that the worker pulls one visible message, decides retry vs quarantine, publishes the next record with an idempotency key, and only then acks the original after the publish lands.
 
 ## Decision record: explicit dead-letter records
 
 **Status:** accepted.
 
-**Context:** tenant onboarding, account lifecycle changes, and admin maintenance are asynchronous. Repeating a permanently rejected job hides useful work behind one poison message. Operators need the tenant, operation, attempt, requester, and reason in a record they can inspect and replay deliberately.
+**Context:** tenant onboarding, account lifecycle changes, and admin maintenance run async. If you keep replaying a permanently rejected job, you bury useful work behind a single poison message. Operators want a record with tenant, operation, attempt, requester, and reason so they can inspect and replay it on purpose.
 
-**Decision:** represent failure handling as a typed state transition. Attempts one and two publish a revised `SaaSJob`. Attempt three publishes a `DeadLetter` that retains the domain input and adds the reason. Publication happens before acknowledgement. The idempotency key is derived from the source message and destination state, so a retried request names the same write.
+**Decision:** we model failure handling as a typed state transition. On attempts one and two we publish a revised `SaaSJob`. Attempt three publishes a `DeadLetter` that keeps the domain input and tacks on the reason. We publish before we ack. The idempotency key comes from the source message and destination state, so a retried request points at the same write.
 
-The thin client decodes `{ok, data, error, metadata}` before interpreting HTTP status. Ordinary request rejections remain typed `InfraiError::Rejected` values. HTTP 429 responses honor `Retry-After` when present and otherwise use bounded exponential backoff.
+The thin client decodes `{ok, data, error, metadata}` before it looks at HTTP status. Normal request rejections stay as typed `InfraiError::Rejected` values. On HTTP 429 we honor `Retry-After` if it's there, else we fall back to bounded exponential backoff.
 
 ## Options considered
 
-**A provider-managed DLQ policy.** This is compact and resembles an SQS DLQ. The queue policy owns movement, while the application has less control over the domain record placed in quarantine.
+**A provider-managed DLQ policy.** It's compact and feels like an SQS DLQ. The queue policy controls movement, but your app gets less say over the domain record that lands in quarantine.
 
-**A database failure table.** Transactions and ad hoc queries are attractive when the job already lives beside relational state. It couples queue recovery to the application's database lifecycle and adds a second persistence path to operate.
+**A database failure table.** If the job already sits next to relational state, transactions and quick queries look tempting. But it ties queue recovery to your app's database lifecycle and makes you run a second persistence path.
 
-**A typed dead-letter payload on the queue.** Chosen here. The transition is visible in Rust, deterministic in a unit test, and carries enough tenant context for an administrator to assess replay. The worker remains small because transport stays in `infrai_client.rs` and policy stays in `queue_worker.rs`.
+**A typed dead-letter payload on the queue.** We picked this one. The transition shows up in Rust, is deterministic in a unit test, and carries enough tenant context for an admin to judge replay. The worker stays small because transport lives in `infrai_client.rs` and policy lives in `queue_worker.rs`.
 
 ## The real gotcha
 
-Acknowledgement order is the reliability boundary. Ack first and a process exit can discard the failed job. This implementation publishes the retry or dead-letter record first, then acknowledges the consumed message. Idempotency makes repeating that sequence converge on the same destination write.
+Ack order is the reliability edge. If you ack first, a crash can drop the failed job entirely. Here we publish the retry or dead-letter record first, then ack the consumed message. Idempotency means repeating that sequence lands on the same destination write.
 
 ## Operational boundary
 
-This example owns failure classification and message movement. A production service should add queue-specific routing configuration, metrics for retry and dead-letter counts, and an authenticated admin replay command. Replay should create a new job with an audit identity rather than mutate the quarantined record.
+This example handles failure classification and message movement. In prod you'd add queue-specific routing config, metrics for retry and dead-letter counts, and an authenticated admin replay command. Replay should spawn a new job with an audit identity instead of mutating the quarantined record.
 
 ## License
 
@@ -49,7 +49,7 @@ MIT
 
 ## Production notes: SaaS Dead Letter Worker Dlq SaaS Rust A
 
-The snippet above stays copy-paste simple. Before you ship, a few **required** steps: The details below apply to SaaS Dead Letter Worker Dlq SaaS Rust A.
+The snippet above is copy-paste simple. Before you ship, a few **required** steps: the details below apply to SaaS Dead Letter Worker Dlq SaaS Rust A.
 
 **Account & key**
 
